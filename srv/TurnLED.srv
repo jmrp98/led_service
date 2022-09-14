@@ -1,5 +1,5 @@
 char led_color
-bool led_on
+bool led_on false
 ---
 char r_led_color
 bool r_led_on
