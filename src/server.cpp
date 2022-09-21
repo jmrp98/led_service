@@ -33,32 +33,35 @@ void controlLED(const std::shared_ptr<led_service::srv::TurnLED::Request> reques
 {
     my_serial.flushReceiver();
     //char* out_cmd = std:: to_string(request->led_color) + std:: to_string((int)request->led_on)+std:: to_string("\n");
-    char led_color;
+    uint8_t led_color;
     switch(request->led_color)
     {
         case 1:
-        led_color = 'b';
+        led_color = 0b0001;
         break;
 
         case 2:
-        led_color ='y';
+        led_color = 0b0010;
         break;
 
         case 3:
-        led_color = 'r';
+        led_color = 0b0100;
         break;
 
         default:
-        led_color = '\0';
+        led_color = 0;
         break;
     }
     
-    if(led_color != '\0')
+    if(led_color != 0)
     {
-        char out_cmd [4];
-        sprintf(out_cmd,"%c%d\n",led_color,(int)request->led_on);
-        RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "LED service out: %s",out_cmd);
-        my_serial.writeString(out_cmd);
+        uint8_t out_cmd =  led_color | ((request->led_on) << 3);
+        
+        /*sprintf(out_cmd,"%c%d\n",led_color,(int)request->led_on);
+        RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "LED service out: %s",out_cmd); */
+        
+        RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "LED service out: %d",out_cmd);
+        my_serial.writeBytes(&out_cmd,1);
     }
     response->r_led_color = request->led_color;
     response->r_led_on = request->led_on;

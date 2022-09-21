@@ -1,89 +1,61 @@
 #include "rclcpp/rclcpp.hpp"
+#include "rcl_interfaces/msg/set_parameters_result.hpp"
 #include "led_service/srv/turn_led.hpp"
 #include <chrono>
 #include <memory>
 #include <unistd.h>
 #include <array>
+#include <thread>
+#include <vector>
+#include <mutex>
 
-//using namespace std::chrono_literals;
+
+#define LED_NUMBER 3
+#define BLUE_LED 1
+#define YELLOW_LED 2
+#define RED_LED 3
+
+#define LED_SHORTEST_PERIOD_MS 100
+
+
+
+struct  led_t
+{
+    std::string param_name;
+    uint16_t frequency_ms;
+    uint8_t led_color, led_status;
+
+    led_t(){};
+    led_t(std::string param_name, uint16_t frequency_ms, uint8_t led_color)
+    {
+        this->param_name = param_name;
+        this->frequency_ms = frequency_ms;
+        this->led_color = led_color;
+        led_status = 0;
+    }
+    
+};
+
+
 
 
 class LEDClient : public rclcpp:: Node 
 {
     public: 
+
+    std::vector<led_t>  led_array_;
     //Create a request for the led_service service call
-    LEDClient() : Node("led_client_node")
+    LEDClient(const std::vector<led_t> & led_array) : Node("led_client_node")
     {
-        this-> declare_parameter<uint16_t>("b_freq_ms",4000);
-        this-> declare_parameter<uint16_t>("y_freq_ms",0);
-        this->declare_parameter<uint16_t>("r_freq_ms",0);
+       
         led_client_ = this->create_client<led_service::srv::TurnLED>("turn_led");
-
-        /*blue_timer_ = this ->create_wall_timer(std::chrono::milliseconds(50),
-            [this]()
-            {
-                timer_callback(&b_freq_ms_,"b_freq_ms",1,blue_timer_);
-            }
-            );*/
-
-
-
-    }
-
-    void start(void)
-    {
-        using namespace std::chrono;
-
-        std::array<std::chrono::system_clock::time_point,3> led_timers;
-        std::array<std::string,3>  params_names = {"b_freq_ms","y_freq_ms","r_freq_ms"};
-        std::array<bool,3> led_status = {false,false,false};
-
-        auto request = std::make_shared<led_service::srv::TurnLED::Request>();
-
-        for(auto i : led_timers)
+        this->led_array_ = led_array;
+        for(auto &led : led_array_)
         {
-            i = std::chrono::system_clock::now();
-        }
+            this-> declare_parameter<uint16_t>(led.param_name, led.frequency_ms);
+        }  
 
-
-        //uint32_t min_freq;
-        while(true)
-        {
-            for(std::size_t i = 0 ; i<led_freq_param_.size();i++)
-            {
-                this->get_parameter(params_names[i],led_freq_param_[i]);
-            }
-
-            
-            for(std::size_t i =0 ; i<led_timers.size();i++)
-            {
-                auto led_timer_ms = time_point_cast<milliseconds>(led_timers[i]).time_since_epoch().count();
-                auto  now = system_clock::now() ;
-                auto now_ms= time_point_cast<milliseconds>(now).time_since_epoch().count();
-                auto delta_time = now_ms - led_timer_ms;
-
-                if(led_freq_param_[i]>0 && delta_time >= led_freq_param_[i])
-                {
-                    //LED number
-                    request->led_color = i+1; 
-                    
-                    led_status[i] = !(led_status[i]);
-                    request->led_on =  !(led_status[i]);
-
-                    send_request(request);
-                    led_timers[i] = system_clock::now();    
-
-                }
-            }
-        }
-
-    }
-
-    void send_request(std::shared_ptr<led_service::srv::TurnLED::Request> request)
-    {
-        RCLCPP_INFO(get_logger(),"Attempting to change LED frequency");
-
-        //Wait for service to be available
+         //Wait for service to be available
 
         if(!led_client_ ->wait_for_service(std::chrono::seconds(5)))
         {
@@ -91,15 +63,87 @@ class LEDClient : public rclcpp:: Node
             return;
         }
 
+        callback_handle_ = this->add_on_set_parameters_callback(
+            std::bind(&LEDClient::parametersCallback, this, std::placeholders::_1));
+    }
+
+
+    rcl_interfaces::msg::SetParametersResult parametersCallback( 
+            const std::vector<rclcpp::Parameter> &parameters)
+    {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = false;
+        result.reason = "";
+
+        for(const auto &param : parameters)
+        {
+            if(param.get_type() != rclcpp::ParameterType::PARAMETER_INTEGER )
+            {    
+                result.reason = "Parameter is not an integer";
+                RCLCPP_ERROR(this->get_logger(), "Parameter update failed");
+                continue;
+            }
+            
+            uint16_t param_value = param.as_int();
+            if(param_value < LED_SHORTEST_PERIOD_MS && param_value != 0)
+            {
+                result.reason = "Blinking period shorter than ms: " + LED_SHORTEST_PERIOD_MS;
+                RCLCPP_ERROR(this->get_logger(), "Parameter update failed");
+                continue;
+            }
+
+            std::string param_name = param.get_name();
+
+           for(auto &led : led_array_ )
+           {
+                if(led.param_name == param_name)
+                {
+                    led.frequency_ms = param.as_int();
+                    result.successful = true;
+                    result.reason = "Success setting parameter";
+                    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Parameter updated successfully");
+                    break;
+                }
+           }
+        }
+
+        return result;
+    }
+
+    void start(led_t* led)
+    {
+        while(true)
+        {
+            if(led->frequency_ms > 0 && led->frequency_ms > LED_SHORTEST_PERIOD_MS)
+            {
+            auto request = std::make_shared<led_service::srv::TurnLED::Request>();
+            request->led_color = led->led_color;
+            led->led_status= !(led->led_status);
+            request->led_on = led->led_status;
+            send_request(request);
+            std::this_thread::sleep_for(std::chrono::milliseconds(led->frequency_ms));
+            }
+            else
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+
+    }
+
+    void send_request(std::shared_ptr<led_service::srv::TurnLED::Request> request)
+    {
+       // RCLCPP_INFO(get_logger(),"Attempting to change LED frequency");
 
         auto future = led_client_ ->async_send_request(request);
         
-        
+        this->start_func_mutex_.lock();
         if(rclcpp::spin_until_future_complete(this->get_node_base_interface(),future) != rclcpp::executor::FutureReturnCode::SUCCESS)
         {
             RCLCPP_ERROR(this->get_logger(),"Failed to receive led_service service response");
             return;
         }
+        this->start_func_mutex_.unlock();
 
         auto response = future.get();
         if(response -> r_led_color != request->led_color)
@@ -108,57 +152,13 @@ class LEDClient : public rclcpp:: Node
             return;
         }
 
-        RCLCPP_INFO(this->get_logger(),"Led_service service working");
+        RCLCPP_INFO(this->get_logger(),"Led_service request successful");
     }
 
     private:
     rclcpp::Client<led_service::srv::TurnLED>::SharedPtr led_client_;
-    rclcpp::TimerBase::SharedPtr blue_timer_;
-    rclcpp::TimerBase::SharedPtr yellow_timer_;
-    rclcpp::TimerBase::SharedPtr red_timer_;
-
-    /*uint16_t b_freq_ms_ =0;
-    uint16_t y_freq_ms_ =0;
-    uint16_t r_freq_ms_=0;*/
-    std::array<uint16_t,3> led_freq_param_ = {0,0,0};
-    
-    
-    
-    //Tried  implementation using timers
-    void timer_callback(uint16_t* led_freq_param, std::string param_name, uint8_t led_color,rclcpp::TimerBase::SharedPtr led_timer)
-    {
-        led_timer ->cancel();
-        //Check if the frequency for a given LED was
-        uint16_t prev_freq  = *led_freq_param;
-        this->get_parameter(param_name,*led_freq_param);
-        
-
-        auto request = std::make_shared<led_service::srv::TurnLED::Request>();
-        request->led_color = led_color;
-        request->led_on= !(request->led_on);
-        
-        send_request(request);
-        
-        if(prev_freq != *led_freq_param)
-        {
-            
-            
-            led_timer = this ->create_wall_timer(std::chrono::milliseconds(*led_freq_param),
-            [&]()
-            {
-                timer_callback(led_freq_param,param_name,led_color,led_timer);
-            }
-            );
-
-            return;
-        }
-
-        led_timer ->reset();
-
-    }
-
-
-    
+    std::mutex start_func_mutex_ ;
+    OnSetParametersCallbackHandle::SharedPtr callback_handle_;
 
 };
 
@@ -171,8 +171,31 @@ int main(int argc, char **argv)
     // This must be called before anything else ROS-related
     rclcpp::init(argc, argv);
     
-    auto led_client_node = std::make_shared<LEDClient>();
-    led_client_node->start();
+    
+    led_t blue_led("blue_freq_ms",4000,BLUE_LED);
+    led_t red_led("red_freq_ms",4000,RED_LED);
+    led_t yellow_led("yellow_freq_ms",4000,YELLOW_LED);
+    std::vector<led_t> led_array = {blue_led,red_led,yellow_led};
+
+    
+    auto led_client_node = std::make_shared<LEDClient>(led_array);
+    std::vector<std::thread> thread_array;
+    for(size_t i=0; i<led_array.size(); i++)
+    {
+        std::thread thread_ ((&LEDClient::start),led_client_node,&(led_client_node->led_array_[i]));
+        thread_array.push_back(std::move(thread_));
+
+    }
+
+    for(auto &thread_t : thread_array)
+    {
+        if(thread_t.joinable())
+        thread_t.join();
+    }
+
+
+    
+    led_client_node->start(&blue_led);
     
     //rclcpp::spin(led_client_node);
     rclcpp::shutdown();
